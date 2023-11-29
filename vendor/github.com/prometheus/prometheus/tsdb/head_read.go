@@ -142,7 +142,7 @@ func (h *headIndexReader) SortedPostings(p index.Postings) index.Postings {
 	}
 
 	slices.SortFunc(series, func(a, b *memSeries) int {
-		return labels.Compare(a.lset, b.lset)
+		return labels.Compare(a.labels(), b.labels())
 	})
 
 	// Convert back to list.
@@ -200,7 +200,7 @@ func (h *headIndexReader) Series(ref storage.SeriesRef, builder *labels.ScratchB
 		h.head.metrics.seriesNotFound.Inc()
 		return storage.ErrNotFound
 	}
-	builder.Assign(s.lset)
+	builder.Assign(s.labels())
 
 	if chks == nil {
 		return nil
@@ -270,7 +270,7 @@ func (h *headIndexReader) LabelValueFor(_ context.Context, id storage.SeriesRef,
 		return "", storage.ErrNotFound
 	}
 
-	value := memSeries.lset.Get(label)
+	value := memSeries.labels().Get(label)
 	if value == "" {
 		return "", storage.ErrNotFound
 	}
@@ -290,7 +290,7 @@ func (h *headIndexReader) LabelNamesFor(ctx context.Context, ids ...storage.Seri
 		if memSeries == nil {
 			return nil, storage.ErrNotFound
 		}
-		memSeries.lset.Range(func(lbl labels.Label) {
+		memSeries.labels().Range(func(lbl labels.Label) {
 			namesMap[lbl.Name] = struct{}{}
 		})
 	}
