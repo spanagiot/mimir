@@ -2572,7 +2572,7 @@ func (i *Ingester) createTSDB(userID string, walReplayConcurrency int) (*userTSD
 			localSeriesLimit: initialLocalLimit,
 		},
 	}
-	userDB.resetSymbolTable()
+	userDB.resetSymbolTable(i.logger)
 	userDB.triggerRecomputeOwnedSeries(recomputeOwnedSeriesReasonNewUser)
 
 	oooTW := i.limits.OutOfOrderTimeWindow(userID)
@@ -3091,7 +3091,7 @@ func (i *Ingester) compactBlocks(ctx context.Context, force bool, forcedCompacti
 		default:
 			reason = "regular"
 			err = userDB.Compact()
-			userDB.resetSymbolTable()
+			userDB.resetSymbolTable(i.logger)
 		}
 
 		if err != nil {
