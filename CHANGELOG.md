@@ -113,7 +113,7 @@
 * [ENHANCEMENT] `mimirtool promql format`: Format PromQL query with Prometheus' string or pretty-print formatter. #7742
 * [BUGFIX] `mimirtool rules prepare`: do not add aggregation label to `on()` clause if already present in `group_left()` or `group_right()`. #7839
 * [BUGFIX] Analyze Grafana: fix parsing queries with variables. #8062
-* [ENHANCEMENT] Add flag `--output-dir` to `mimirtool rules get` to allow persisting rule to a file for edit and re-upload. #7247
+* [ENHANCEMENT] Add option `--output-dir` to `mimirtool rules get` to allow persisting rule to a file for edit and re-upload. #7247
 
 ### Mimir Continuous Test
 
