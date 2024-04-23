@@ -227,7 +227,7 @@ func toHTTPStatus(ctx context.Context, pushErr error, limits *validation.Overrid
 		case mimirpb.TSDB_UNAVAILABLE:
 			return http.StatusServiceUnavailable
 		case mimirpb.CIRCUIT_BREAKER_OPEN:
-			return http.StatusServiceUnavailable
+			return http.StatusInternalServerError
 		case mimirpb.METHOD_NOT_ALLOWED:
 			// Return a 501 (and not 405) to explicitly signal a misconfiguration and to possibly track that amongst other 5xx errors.
 			return http.StatusNotImplemented
