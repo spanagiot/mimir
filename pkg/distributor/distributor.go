@@ -1445,6 +1445,7 @@ func (d *Distributor) sendWriteRequestToBackends(ctx context.Context, tenantID s
 }
 
 func (d *Distributor) sendWriteRequestToIngesters(ctx context.Context, tenantRing ring.DoBatchRing, req *mimirpb.WriteRequest, keys []uint32, initialMetadataIndex int, remoteRequestContext func() context.Context, batchOptions ring.DoBatchOptions) error {
+	strKeys := fmt.Sprintf("%v", keys)
 	err := ring.DoBatchWithOptions(ctx, ring.WriteNoExtend, tenantRing, keys,
 		func(ingester ring.InstanceDesc, indexes []int) error {
 			req := req.ForIndexes(indexes, initialMetadataIndex)
@@ -1459,11 +1460,18 @@ func (d *Distributor) sendWriteRequestToIngesters(ctx context.Context, tenantRin
 			ctx = grpcutil.AppendMessageSizeToOutgoingContext(ctx, req) // Let ingester know the size of the message, without needing to read the message first.
 
 			_, err = c.Push(ctx, req)
-			err = wrapIngesterPushError(err, ingester.Id)
-			err = wrapDeadlineExceededPushError(err)
+			err1 := wrapIngesterPushError(err, ingester.Id)
+			err2 := wrapDeadlineExceededPushError(err1)
+			if err != nil {
+				level.Error(d.log).Log("msg", "error executing callback of a push request", "ingester", ingester, "keys", strKeys, "pushErr", err, "ingesterPushErr", err1, "deadlinePushErr", err2)
+			}
 
-			return err
+			return err2
 		}, batchOptions)
+
+	if err != nil {
+		level.Error(d.log).Log("msg", "error executing sendWriteRequestToIngesters", "keys", strKeys, "err", err)
+	}
 
 	// Since data may be written to different backends it may be helpful to clearly identify which backend failed.
 	return errors.Wrap(err, "send data to ingesters")

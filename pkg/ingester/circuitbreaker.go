@@ -49,6 +49,7 @@ type circuitBreaker struct {
 	ingesterID string
 	metrics    *ingesterMetrics
 	executor   failsafe.Executor[any]
+	logger     log.Logger
 }
 
 func newCircuitBreaker(ingesterID string, cfg CircuitBreakerConfig, metrics *ingesterMetrics, logger log.Logger) *circuitBreaker {
@@ -94,6 +95,7 @@ func newCircuitBreaker(ingesterID string, cfg CircuitBreakerConfig, metrics *ing
 		ingesterID:     ingesterID,
 		metrics:        metrics,
 		executor:       failsafe.NewExecutor[any](cb),
+		logger:         logger,
 	}
 }
 
@@ -138,11 +140,20 @@ func RunWithResult[R any](ctx context.Context, cb *circuitBreaker, callback func
 	)
 	err := cb.Run(func() error {
 		callbackResult, callbackErr = callback(ctx)
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if callbackErr != nil {
+			level.Error(cb.logger).Log("msg", "RunWithResult's callback ended with an error", "ingester", cb.ingesterID, "err", callbackErr, "ctxErr", ctx.Err())
+			return callbackErr
+		}
+		callbackErr = ctx.Err()
+		if callbackErr != nil {
+			level.Error(cb.logger).Log("msg", "RunWithResult's callback ended without any error, but the error was found in the context", "ingester", cb.ingesterID, "ctxErr", callbackErr)
 		}
 		return callbackErr
 	})
+
+	if callbackErr == nil && err != nil {
+		level.Error(cb.logger).Log("msg", "RunWithResult's callback ended without any error, but the error was found in the circuit breaker executor", "err", err)
+	}
 
 	return callbackResult, err
 }
@@ -151,13 +162,23 @@ func Run(ctx context.Context, cb *circuitBreaker, callback func(ctx context.Cont
 	if cb == nil {
 		return callback(ctx)
 	}
+	var callbackErr error
 	err := cb.Run(func() error {
-		err := callback(ctx)
-		if ctx.Err() != nil {
-			return ctx.Err()
+		callbackErr = callback(ctx)
+		if callbackErr != nil {
+			level.Error(cb.logger).Log("msg", "Run's callback ended with an error", "ingester", cb.ingesterID, "err", callbackErr, "ctxErr", ctx.Err())
+			return callbackErr
 		}
-		return err
+		callbackErr = ctx.Err()
+		if callbackErr != nil {
+			level.Error(cb.logger).Log("msg", "Run's callback ended without any error, but the error was found in the context", "ingester", cb.ingesterID, "ctxErr", callbackErr)
+		}
+		return callbackErr
 	})
+
+	if callbackErr == nil && err != nil {
+		level.Error(cb.logger).Log("msg", "Run's callback ended without any error, but the error was found in the circuit breaker executor", "err", err)
+	}
 
 	return err
 }
