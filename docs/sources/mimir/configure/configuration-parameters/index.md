@@ -1207,6 +1207,31 @@ instance_limits:
 # owned series as a result of detected change.
 # CLI flag: -ingester.owned-series-update-interval
 [owned_series_update_interval: <duration> | default = 15s]
+
+circuit_breaker:
+  # (experimental) Enable circuit breaking when making requests to ingesters
+  # CLI flag: -ingester.circuit-breaker.enabled
+  [enabled: <boolean> | default = false]
+
+  # (experimental) Max percentage of requests that can fail over period before
+  # the circuit breaker opens
+  # CLI flag: -ingester.circuit-breaker.failure-threshold
+  [failure_threshold: <int> | default = 10]
+
+  # (experimental) How many requests must have been executed in period for the
+  # circuit breaker to be eligible to open for the rate of failures
+  # CLI flag: -ingester.circuit-breaker.failure-execution-threshold
+  [failure_execution_threshold: <int> | default = 100]
+
+  # (experimental) Moving window of time that the percentage of failed requests
+  # is computed over
+  # CLI flag: -ingester.circuit-breaker.thresholding-period
+  [thresholding_period: <duration> | default = 1m]
+
+  # (experimental) How long the circuit breaker will stay in the open state
+  # before allowing some requests
+  # CLI flag: -ingester.circuit-breaker.cooldown-period
+  [cooldown_period: <duration> | default = 10s]
 ```
 
 ### querier

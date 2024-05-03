@@ -59,6 +59,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 
+	"github.com/grafana/mimir/pkg/util/spanlogger"
+
 	"github.com/grafana/mimir/pkg/ingester/activeseries"
 	"github.com/grafana/mimir/pkg/ingester/client"
 	"github.com/grafana/mimir/pkg/mimirpb"
@@ -2770,6 +2772,124 @@ func TestIngester_Push_ShouldCorrectlyTrackMetricsInMultiTenantScenario(t *testi
 	assert.NoError(t, testutil.GatherAndCompare(registry, strings.NewReader(expectedMetrics), metricNames...))
 }
 
+func TestIngester_Push_CircuitBreaker(t *testing.T) {
+	tests := map[string]struct {
+		expectedErrorWhenCircuitBreakerClosed error
+		ctx                                   func(context.Context) context.Context
+		pCallback                             pushCallback
+	}{
+		"deadline exceeded": {
+			expectedErrorWhenCircuitBreakerClosed: nil,
+			ctx: func(ctx context.Context) context.Context {
+				ctx, _ = context.WithTimeout(ctx, time.Millisecond)
+				return ctx
+			},
+			pCallback: func(req *mimirpb.WriteRequest) func(context.Context) (*mimirpb.WriteResponse, error) {
+				return func(ctx context.Context) (*mimirpb.WriteResponse, error) {
+					time.Sleep(2 * time.Millisecond)
+					return &mimirpb.WriteResponse{}, nil
+				}
+			},
+		},
+		"instance limit hit": {
+			expectedErrorWhenCircuitBreakerClosed: instanceLimitReachedError{},
+			pCallback: func(req *mimirpb.WriteRequest) func(context.Context) (*mimirpb.WriteResponse, error) {
+				return func(ctx context.Context) (*mimirpb.WriteResponse, error) {
+					return nil, newInstanceLimitReachedError("instance limit has been reached")
+				}
+			},
+		},
+	}
+
+	for testName, testCase := range tests {
+		t.Run(testName, func(t *testing.T) {
+			metricLabelAdapters := [][]mimirpb.LabelAdapter{{{Name: labels.MetricName, Value: "test"}}}
+			metricNames := []string{
+				"cortex_ingester_circuit_breaker_results_total",
+				"cortex_ingester_circuit_breaker_transitions_total",
+			}
+
+			registry := prometheus.NewRegistry()
+
+			// Create a mocked ingester
+			cfg := defaultIngesterTestConfig(t)
+			cfg.ActiveSeriesMetrics.IdleTimeout = 100 * time.Millisecond
+
+			failureThreshold := 2
+			cfg.CircuitBreakerConfig = CircuitBreakerConfig{
+				Enabled:          true,
+				FailureThreshold: uint(failureThreshold),
+				CooldownPeriod:   10 * time.Second,
+				testModeEnabled:  true,
+			}
+
+			i, err := prepareIngesterWithBlocksStorage(t, cfg, nil, registry)
+			require.NoError(t, err)
+			require.NoError(t, services.StartAndAwaitRunning(context.Background(), i))
+			defer services.StopAndAwaitTerminated(context.Background(), i) //nolint:errcheck
+
+			// Wait until the ingester is healthy
+			test.Poll(t, 100*time.Millisecond, 1, func() interface{} {
+				return i.lifecycler.HealthyInstancesCount()
+			})
+
+			count := 0
+
+			// Push timeseries for each user
+			for _, userID := range []string{"test-1", "test-2"} {
+				reqs := []*mimirpb.WriteRequest{
+					mimirpb.ToWriteRequest(
+						metricLabelAdapters,
+						[]mimirpb.Sample{{Value: 1, TimestampMs: 9}},
+						nil,
+						nil,
+						mimirpb.API,
+					),
+					mimirpb.ToWriteRequest(
+						metricLabelAdapters,
+						[]mimirpb.Sample{{Value: 2, TimestampMs: 10}},
+						nil,
+						nil,
+						mimirpb.API,
+					),
+				}
+
+				for _, req := range reqs {
+					ctx := user.InjectOrgID(context.Background(), userID)
+					count++
+					if testCase.ctx != nil {
+						ctx = testCase.ctx(ctx)
+					}
+					_, err = i.pushWithCallback(ctx, req, testCase.pCallback)
+					if count <= failureThreshold {
+						if testCase.expectedErrorWhenCircuitBreakerClosed != nil {
+							require.ErrorAs(t, err, &testCase.expectedErrorWhenCircuitBreakerClosed)
+						}
+					} //else {
+					//	var cbOpenErr circuitBreakerOpenError
+					//	require.ErrorAs(t, err, &cbOpenErr)
+					//}
+				}
+			}
+
+			// Check tracked Prometheus metrics
+			expectedMetrics := `
+				# HELP cortex_ingester_circuit_breaker_results_total Results of executing requests via the circuit breaker
+				# TYPE cortex_ingester_circuit_breaker_results_total counter
+				cortex_ingester_circuit_breaker_results_total{ingester="localhost",result="circuit_breaker_open"} 2
+				cortex_ingester_circuit_breaker_results_total{ingester="localhost",result="error"} 2
+				cortex_ingester_circuit_breaker_results_total{ingester="localhost",result="success"} 0
+				# HELP cortex_ingester_circuit_breaker_transitions_total Number times the circuit breaker has entered a state
+				# TYPE cortex_ingester_circuit_breaker_transitions_total counter
+				cortex_ingester_circuit_breaker_transitions_total{ingester="localhost",state="closed"} 0
+				cortex_ingester_circuit_breaker_transitions_total{ingester="localhost",state="half-open"} 0
+        		cortex_ingester_circuit_breaker_transitions_total{ingester="localhost",state="open"} 1
+    		`
+			assert.NoError(t, testutil.GatherAndCompare(registry, strings.NewReader(expectedMetrics), metricNames...))
+		})
+	}
+}
+
 func TestIngester_Push_DecreaseInactiveSeries(t *testing.T) {
 	metricLabelAdapters := [][]mimirpb.LabelAdapter{{{Name: labels.MetricName, Value: "test"}}}
 	metricLabelAdaptersHist := [][]mimirpb.LabelAdapter{{{Name: labels.MetricName, Value: "test_histogram"}}}
@@ -4646,6 +4766,111 @@ func TestIngester_QueryStream_TimeseriesWithManySamples(t *testing.T) {
 	require.Equal(t, 10000+50000+samplesCount, totalSamples)
 }
 
+func TestIngester_QueryStream_CircuitBreaker(t *testing.T) {
+	tests := map[string]struct {
+		expectedErrorWhenCircuitBreakerClosed error
+		ctx                                   func(context.Context) context.Context
+		callback                              queryStreamCallback
+	}{
+		"deadline exceeded": {
+			expectedErrorWhenCircuitBreakerClosed: nil,
+			ctx: func(ctx context.Context) context.Context {
+				ctx, _ = context.WithTimeout(ctx, time.Millisecond)
+				return ctx
+			},
+			callback: func(request *client.QueryRequest, server client.Ingester_QueryStreamServer, logger *spanlogger.SpanLogger) func(context.Context) error {
+				return func(ctx context.Context) error {
+					time.Sleep(2 * time.Millisecond)
+					return nil
+				}
+			},
+		},
+		"instance limit hit": {
+			expectedErrorWhenCircuitBreakerClosed: instanceLimitReachedError{},
+			callback: func(request *client.QueryRequest, server client.Ingester_QueryStreamServer, logger *spanlogger.SpanLogger) func(context.Context) error {
+				return func(ctx context.Context) error {
+					return newInstanceLimitReachedError("instance limit has been reached")
+				}
+			},
+		},
+	}
+
+	for testName, testCase := range tests {
+		t.Run(testName, func(t *testing.T) {
+			metricNames := []string{
+				"cortex_ingester_circuit_breaker_results_total",
+				"cortex_ingester_circuit_breaker_transitions_total",
+			}
+
+			registry := prometheus.NewRegistry()
+
+			// Create a mocked ingester
+			cfg := defaultIngesterTestConfig(t)
+			cfg.ActiveSeriesMetrics.IdleTimeout = 100 * time.Millisecond
+
+			failureThreshold := 2
+			cfg.CircuitBreakerConfig = CircuitBreakerConfig{
+				Enabled:          true,
+				FailureThreshold: uint(failureThreshold),
+				CooldownPeriod:   10 * time.Second,
+				testModeEnabled:  true,
+			}
+
+			i, err := prepareIngesterWithBlocksStorage(t, cfg, nil, registry)
+			require.NoError(t, err)
+			require.NoError(t, services.StartAndAwaitRunning(context.Background(), i))
+			defer services.StopAndAwaitTerminated(context.Background(), i) //nolint:errcheck
+
+			// Wait until the ingester is healthy
+			test.Poll(t, 100*time.Millisecond, 1, func() interface{} {
+				return i.lifecycler.HealthyInstancesCount()
+			})
+
+			userID := "test-1"
+			ctx := user.InjectOrgID(context.Background(), userID)
+
+			for k := 0; k < 10; k++ {
+				req := &client.QueryRequest{
+					StartTimestampMs: math.MinInt64,
+					EndTimestampMs:   math.MaxInt64,
+					Matchers: []*client.LabelMatcher{
+						{Type: client.EQUAL, Name: model.MetricNameLabel, Value: "foo"},
+					},
+				}
+				c := ctx
+				if testCase.ctx != nil {
+					c = testCase.ctx(c)
+				}
+				s := stream{ctx: c}
+				err = i.queryStreamWithCallback(req, &s, testCase.callback)
+				if k <= failureThreshold {
+					if testCase.expectedErrorWhenCircuitBreakerClosed != nil {
+						require.ErrorAs(t, err, &testCase.expectedErrorWhenCircuitBreakerClosed)
+					}
+				} else {
+					var cbOpenErr circuitBreakerOpenError
+					require.ErrorAs(t, err, &cbOpenErr)
+				}
+			}
+
+			// Check tracked Prometheus metrics
+			expectedMetrics := `
+				# HELP cortex_ingester_circuit_breaker_results_total Results of executing requests via the circuit breaker
+				# TYPE cortex_ingester_circuit_breaker_results_total counter
+				cortex_ingester_circuit_breaker_results_total{ingester="localhost",result="circuit_breaker_open"} 8
+				cortex_ingester_circuit_breaker_results_total{ingester="localhost",result="error"} 2
+				cortex_ingester_circuit_breaker_results_total{ingester="localhost",result="success"} 0
+				# HELP cortex_ingester_circuit_breaker_transitions_total Number times the circuit breaker has entered a state
+				# TYPE cortex_ingester_circuit_breaker_transitions_total counter
+				cortex_ingester_circuit_breaker_transitions_total{ingester="localhost",state="closed"} 0
+				cortex_ingester_circuit_breaker_transitions_total{ingester="localhost",state="half-open"} 0
+        		cortex_ingester_circuit_breaker_transitions_total{ingester="localhost",state="open"} 1
+    		`
+			assert.NoError(t, testutil.GatherAndCompare(registry, strings.NewReader(expectedMetrics), metricNames...))
+		})
+	}
+}
+
 func setupQueryingManySamplesAsChunksTest(ctx context.Context, t *testing.T, cfg Config) client.HealthAndIngesterClient {
 	const sampleCount = 1_000_000
 
@@ -5342,7 +5567,7 @@ func prepareIngesterWithBlockStorageAndOverridesAndPartitionRing(t testing.TB, i
 		ingestersRing = createAndStartRing(t, ingesterCfg.IngesterRing.ToRingConfig())
 	}
 
-	ingester, err := New(ingesterCfg, overrides, ingestersRing, partitionsRing, nil, registerer, noDebugNoopLogger{}) // LOGGING: log.NewLogfmtLogger(os.Stderr)
+	ingester, err := New(ingesterCfg, overrides, ingestersRing, partitionsRing, nil, registerer, log.NewLogfmtLogger(os.Stdout)) // LOGGING: log.NewLogfmtLogger(os.Stderr)
 	if err != nil {
 		return nil, err
 	}
