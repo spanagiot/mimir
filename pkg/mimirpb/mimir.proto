@@ -61,6 +61,13 @@ message TimeSeries {
   repeated Histogram histograms = 4 [(gogoproto.nullable) = false];
 }
 
+message TimeSeriesNoExemplars {
+  repeated LabelPair labels = 1 [(gogoproto.nullable) = false, (gogoproto.customtype) = "LabelAdapter"];
+  // Sorted by time, oldest sample first.
+  repeated Sample samples = 2 [(gogoproto.nullable) = false];
+  repeated Histogram histograms = 4 [(gogoproto.nullable) = false];
+}
+
 message LabelPair {
   bytes name  = 1;
   bytes value = 2;
