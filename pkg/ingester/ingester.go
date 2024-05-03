@@ -407,7 +407,7 @@ func New(cfg Config, limits *validation.Overrides, ingestersRing ring.ReadRing, 
 	i.activeGroups = activeGroupsCleanupService
 
 	if cfg.CircuitBreakerConfig.Enabled {
-		i.circuitBreaker = newCircuitBreaker(cfg.IngesterRing.InstanceID, cfg.CircuitBreakerConfig, i.metrics, logger)
+		i.circuitBreaker = newCircuitBreaker(i)
 	}
 
 	if registerer != nil {
@@ -2001,20 +2001,8 @@ func createUserStats(db *userTSDB, req *client.UserStatsRequest) (*client.UserSt
 
 const queryStreamBatchMessageSize = 1 * 1024 * 1024
 
-type queryStreamCallback func(*client.QueryRequest, client.Ingester_QueryStreamServer, *spanlogger.SpanLogger) func(context.Context) error
-
 // QueryStream streams metrics from a TSDB. This implements the client.IngesterServer interface
 func (i *Ingester) QueryStream(req *client.QueryRequest, stream client.Ingester_QueryStreamServer) (err error) {
-	qsCallback := func(req *client.QueryRequest, stream client.Ingester_QueryStreamServer, spanlog *spanlogger.SpanLogger) func(context.Context) error {
-		return func(ctx context.Context) error {
-			return i.queryStream(ctx, req, stream, spanlog)
-		}
-	}
-
-	return i.queryStreamWithCallback(req, stream, qsCallback)
-}
-
-func (i *Ingester) queryStreamWithCallback(req *client.QueryRequest, stream client.Ingester_QueryStreamServer, qsCallback queryStreamCallback) (err error) {
 	defer func() { err = i.mapReadErrorToErrorWithStatus(err) }()
 	if err := i.checkAvailableForRead(); err != nil {
 		return err
@@ -2026,7 +2014,10 @@ func (i *Ingester) queryStreamWithCallback(req *client.QueryRequest, stream clie
 	spanlog, ctx := spanlogger.NewWithLogger(stream.Context(), i.logger, "Ingester.QueryStream")
 	defer spanlog.Finish()
 
-	return Run(ctx, i.circuitBreaker, qsCallback(req, stream, spanlog))
+	if i.circuitBreaker != nil {
+		return i.circuitBreaker.QueryStream(ctx, req, stream, spanlog)
+	}
+	return i.queryStream(ctx, req, stream, spanlog)
 }
 
 func (i *Ingester) queryStream(ctx context.Context, req *client.QueryRequest, stream client.Ingester_QueryStreamServer, spanlog *spanlogger.SpanLogger) (err error) {
@@ -3782,22 +3773,6 @@ func (i *Ingester) PushToStorage(ctx context.Context, req *mimirpb.WriteRequest)
 	return nil
 }
 
-type pushCallback func(req *mimirpb.WriteRequest) func(context.Context) (*mimirpb.WriteResponse, error)
-
-// Push implements client.IngesterServer, which is registered into gRPC server.
-func (i *Ingester) Push(ctx context.Context, req *mimirpb.WriteRequest) (*mimirpb.WriteResponse, error) {
-	callback := func(req *mimirpb.WriteRequest) func(context.Context) (*mimirpb.WriteResponse, error) {
-		return func(ctx context.Context) (*mimirpb.WriteResponse, error) {
-			return i.push(ctx, req)
-		}
-	}
-	return i.pushWithCallback(ctx, req, callback)
-}
-
-func (i *Ingester) pushWithCallback(ctx context.Context, req *mimirpb.WriteRequest, callback pushCallback) (*mimirpb.WriteResponse, error) {
-	return RunWithResult[mimirpb.WriteResponse](ctx, i.circuitBreaker, callback(req))
-}
-
 func getRequestID(ctx context.Context) string {
 	requestID := "unknown"
 	md, ok := metadata.FromIncomingContext(ctx)
@@ -3808,6 +3783,14 @@ func getRequestID(ctx context.Context) string {
 		}
 	}
 	return requestID
+}
+
+// Push implements client.IngesterServer, which is registered into gRPC server.
+func (i *Ingester) Push(ctx context.Context, req *mimirpb.WriteRequest) (*mimirpb.WriteResponse, error) {
+	if i.circuitBreaker != nil {
+		return i.circuitBreaker.Push(ctx, req)
+	}
+	return i.push(ctx, req)
 }
 
 func (i *Ingester) push(ctx context.Context, req *mimirpb.WriteRequest) (*mimirpb.WriteResponse, error) {
@@ -3829,19 +3812,6 @@ func (i *Ingester) push(ctx context.Context, req *mimirpb.WriteRequest) (*mimirp
 	ingesterID := i.cfg.IngesterRing.InstanceID
 
 	level.Info(i.logger).Log("msg", "Push is being executed", "ingester", ingesterID, "currentTimeout", currentTimeout, "remainingTime", remainingTime, "requestID", requestID)
-	var sleepingTime time.Duration
-	switch ingesterID {
-	case "ingester-zone-a-0":
-		sleepingTime = 400 * time.Millisecond
-	case "ingester-zone-b-0":
-		sleepingTime = 200 * time.Millisecond
-	case "ingester-zone-c-0":
-		sleepingTime = 100 * time.Millisecond
-	}
-
-	if sleepingTime != 0 {
-		time.Sleep(sleepingTime)
-	}
 
 	err := i.PushToStorage(ctx, req)
 

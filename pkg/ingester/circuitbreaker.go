@@ -11,6 +11,10 @@ import (
 	"github.com/go-kit/log/level"
 	"github.com/pkg/errors"
 
+	"github.com/grafana/mimir/pkg/util/spanlogger"
+
+	"github.com/grafana/mimir/pkg/ingester/client"
+
 	"github.com/grafana/mimir/pkg/mimirpb"
 
 	"google.golang.org/grpc/codes"
@@ -46,13 +50,14 @@ func (cfg *CircuitBreakerConfig) Validate() error {
 
 type circuitBreaker struct {
 	circuitbreaker.CircuitBreaker[any]
-	ingesterID string
-	metrics    *ingesterMetrics
-	executor   failsafe.Executor[any]
-	logger     log.Logger
+	ingester *Ingester
+	executor failsafe.Executor[any]
 }
 
-func newCircuitBreaker(ingesterID string, cfg CircuitBreakerConfig, metrics *ingesterMetrics, logger log.Logger) *circuitBreaker {
+func newCircuitBreaker(ingester *Ingester) *circuitBreaker {
+	ingesterID := ingester.cfg.IngesterRing.InstanceID
+	cfg := ingester.cfg.CircuitBreakerConfig
+	metrics := ingester.metrics
 	// Initialize each of the known labels for circuit breaker metrics for this particular ingester
 	transitionOpen := metrics.circuitBreakerTransitions.WithLabelValues(ingesterID, circuitbreaker.OpenState.String())
 	transitionHalfOpen := metrics.circuitBreakerTransitions.WithLabelValues(ingesterID, circuitbreaker.HalfOpenState.String())
@@ -71,15 +76,15 @@ func newCircuitBreaker(ingesterID string, cfg CircuitBreakerConfig, metrics *ing
 		}).
 		OnClose(func(event circuitbreaker.StateChangedEvent) {
 			transitionClosed.Inc()
-			level.Info(logger).Log("msg", "circuit breaker is closed", "ingester", ingesterID, "previous", event.OldState, "current", event.NewState)
+			level.Info(ingester.logger).Log("msg", "circuit breaker is closed", "ingester", ingesterID, "previous", event.OldState, "current", event.NewState)
 		}).
 		OnOpen(func(event circuitbreaker.StateChangedEvent) {
 			transitionOpen.Inc()
-			level.Info(logger).Log("msg", "circuit breaker is open", "ingester", ingesterID, "previous", event.OldState, "current", event.NewState)
+			level.Info(ingester.logger).Log("msg", "circuit breaker is open", "ingester", ingesterID, "previous", event.OldState, "current", event.NewState)
 		}).
 		OnHalfOpen(func(event circuitbreaker.StateChangedEvent) {
 			transitionHalfOpen.Inc()
-			level.Info(logger).Log("msg", "circuit breaker is half-open", "ingester", ingesterID, "previous", event.OldState, "current", event.NewState)
+			level.Info(ingester.logger).Log("msg", "circuit breaker is half-open", "ingester", ingesterID, "previous", event.OldState, "current", event.NewState)
 		}).
 		HandleIf(func(_ any, err error) bool { return isFailure(err) })
 
@@ -92,21 +97,9 @@ func newCircuitBreaker(ingesterID string, cfg CircuitBreakerConfig, metrics *ing
 	cb := cbBuilder.Build()
 	return &circuitBreaker{
 		CircuitBreaker: cb,
-		ingesterID:     ingesterID,
-		metrics:        metrics,
+		ingester:       ingester,
 		executor:       failsafe.NewExecutor[any](cb),
-		logger:         logger,
 	}
-}
-
-func (cb *circuitBreaker) Run(f func() error) error {
-	err := cb.executor.Run(f)
-
-	if err != nil && errors.Is(err, circuitbreaker.ErrOpen) {
-		cb.metrics.circuitBreakerResults.WithLabelValues(cb.ingesterID, resultOpen).Inc()
-		return newErrorWithStatus(newCircuitBreakerOpenError(cb.RemainingDelay()), codes.Unavailable)
-	}
-	return err
 }
 
 func isFailure(err error) bool {
@@ -130,55 +123,72 @@ func isFailure(err error) bool {
 	return false
 }
 
-func RunWithResult[R any](ctx context.Context, cb *circuitBreaker, callback func(ctx context.Context) (*R, error)) (*R, error) {
-	if cb == nil {
-		return callback(ctx)
+func (cb *circuitBreaker) ingesterID() string {
+	return cb.ingester.cfg.IngesterRing.InstanceID
+}
+
+func (cb *circuitBreaker) logger() log.Logger {
+	return cb.ingester.logger
+}
+
+func (cb *circuitBreaker) metrics() *ingesterMetrics {
+	return cb.ingester.metrics
+}
+
+func (cb *circuitBreaker) Run(f func() error) error {
+	err := cb.executor.Run(f)
+
+	if err != nil && errors.Is(err, circuitbreaker.ErrOpen) {
+		cb.metrics().circuitBreakerResults.WithLabelValues(cb.ingesterID(), resultOpen).Inc()
+		return newErrorWithStatus(newCircuitBreakerOpenError(cb.RemainingDelay()), codes.Unavailable)
 	}
-	var callbackResult *R
+	return err
+}
+
+func (cb *circuitBreaker) run(ctx context.Context, f func() error) error {
+	err := cb.executor.Run(f)
+	if err != nil && errors.Is(err, circuitbreaker.ErrOpen) {
+		cb.metrics().circuitBreakerResults.WithLabelValues(cb.ingesterID(), resultOpen).Inc()
+		return newErrorWithStatus(newCircuitBreakerOpenError(cb.RemainingDelay()), codes.Unavailable)
+	}
 	requestID := getRequestID(ctx)
-	err := cb.Run(func() error {
+	if err == nil {
+		return nil
+	}
+	if err == ctx.Err() {
+		level.Error(cb.logger()).Log("msg", "Run's callback completed with an error found in the context", "ingester", cb.ingesterID(), "ctxErr", ctx.Err(), "ingesterState", cb.ingester.State().String(), "requestID", requestID, "ingesterState", cb.ingester.State().String())
+		// ctx.Err() was registered with the circuit breaker's executor, but we don't propagate it
+		return nil
+	}
+
+	level.Error(cb.logger()).Log("msg", "Run's callback completed with an error", "ingester", cb.ingesterID(), "err", err, "ingesterState", cb.ingester.State().String(), "requestID", requestID)
+	return err
+}
+
+func (cb *circuitBreaker) Push(ctx context.Context, req *mimirpb.WriteRequest) (*mimirpb.WriteResponse, error) {
+	var callbackResult *mimirpb.WriteResponse
+	err := cb.run(ctx, func() error {
 		var callbackErr error
-		callbackResult, callbackErr = callback(ctx)
+		callbackResult, callbackErr = cb.ingester.push(ctx, req)
 		if callbackErr != nil {
 			return callbackErr
 		}
+		// We return ctx.Err() in order to register it with the circuit breaker's executor
 		return ctx.Err()
 	})
-
-	if ctx.Err() != nil {
-		level.Error(cb.logger).Log("msg", "RunWithResult's callback ended without any error, but the error was found in the context", "ingester", cb.ingesterID, "ctxErr", ctx.Err(), "requestID", requestID)
-		return callbackResult, nil
-	}
-
-	if err != nil {
-		level.Error(cb.logger).Log("msg", "RunWithResult's callback ended with an error", "err", err, "requestID", requestID)
-	}
 
 	return callbackResult, err
 }
 
-func Run(ctx context.Context, cb *circuitBreaker, callback func(ctx context.Context) error) error {
-	if cb == nil {
-		return callback(ctx)
-	}
-	var callbackErr error
-	requestID := getRequestID(ctx)
-	err := cb.Run(func() error {
-		callbackErr = callback(ctx)
-		if callbackErr != nil {
-			return callbackErr
+func (cb *circuitBreaker) QueryStream(ctx context.Context, req *client.QueryRequest, stream client.Ingester_QueryStreamServer, spanlog *spanlogger.SpanLogger) error {
+	err := cb.run(ctx, func() error {
+		err := cb.ingester.queryStream(ctx, req, stream, spanlog)
+		if err != nil {
+			return err
 		}
+		// We return ctx.Err() in order to register it with the circuit breaker's executor
 		return ctx.Err()
 	})
-
-	if ctx.Err() != nil {
-		level.Error(cb.logger).Log("msg", "Run's callback ended without any error, but the error was found in the context", "ingester", cb.ingesterID, "ctxErr", ctx.Err(), requestID, requestID)
-		return nil
-	}
-
-	if err != nil {
-		level.Error(cb.logger).Log("msg", "Run's callback ended with an error", "err", err, "requestID", requestID)
-	}
 
 	return err
 }
