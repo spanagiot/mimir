@@ -1485,6 +1485,7 @@ func randomString(n int) string {
 }
 
 func (d *Distributor) sendWriteRequestToIngesters(ctx context.Context, tenantRing ring.DoBatchRing, req *mimirpb.WriteRequest, keys []uint32, initialMetadataIndex int, remoteRequestContext func() context.Context, batchOptions ring.DoBatchOptions) error {
+	requestID := randomString(20)
 	err := ring.DoBatchWithOptions(ctx, ring.WriteNoExtend, tenantRing, keys,
 		func(ingester ring.InstanceDesc, indexes []int) error {
 			req := req.ForIndexes(indexes, initialMetadataIndex)
@@ -1497,13 +1498,11 @@ func (d *Distributor) sendWriteRequestToIngesters(ctx context.Context, tenantRin
 
 			ctx := remoteRequestContext()
 			ctx = grpcutil.AppendMessageSizeToOutgoingContext(ctx, req) // Let ingester know the size of the message, without needing to read the message first.
-			requestID := randomString(20)
-			ctx = metadata.AppendToOutgoingContext(ctx, "requestID", requestID)
+			ctx = metadata.AppendToOutgoingContext(ctx, "request-id", requestID)
 
 			var (
 				currentTimeout = "unknown"
 				remainingTime  = "unknown"
-				reqID          = "unknown"
 			)
 
 			cT, ok := ctx.Deadline()
@@ -1512,15 +1511,7 @@ func (d *Distributor) sendWriteRequestToIngesters(ctx context.Context, tenantRin
 				remainingTime = fmt.Sprintf("%d", time.Until(cT).Milliseconds())
 			}
 
-			md, ok := metadata.FromIncomingContext(ctx)
-			if ok {
-				reqIDs, ok := md["requestID"]
-				if ok {
-					reqID = reqIDs[0]
-				}
-			}
-
-			level.Info(d.log).Log("msg", "sendWriteRequestToIngesters is pushing data", "ingester", ingester.Id, "currentTimeout", currentTimeout, "remainingTime", remainingTime, "requestID", reqID)
+			level.Info(d.log).Log("msg", "sendWriteRequestToIngesters is pushing data", "ingester", ingester.Id, "currentTimeout", currentTimeout, "remainingTime", remainingTime, "requestID", requestID)
 
 			_, err = c.Push(ctx, req)
 			err = wrapIngesterPushError(err, ingester.Id)
@@ -1530,7 +1521,8 @@ func (d *Distributor) sendWriteRequestToIngesters(ctx context.Context, tenantRin
 		}, batchOptions)
 
 	// Since data may be written to different backends it may be helpful to clearly identify which backend failed.
-	return errors.Wrap(err, "send data to ingesters")
+	errDetails := fmt.Sprintf("send data to ingesters for request-id %s", requestID)
+	return errors.Wrap(err, errDetails)
 }
 
 func (d *Distributor) sendWriteRequestToPartitions(ctx context.Context, tenantID string, tenantRing ring.DoBatchRing, req *mimirpb.WriteRequest, keys []uint32, initialMetadataIndex int, remoteRequestContext func() context.Context, batchOptions ring.DoBatchOptions) error {
