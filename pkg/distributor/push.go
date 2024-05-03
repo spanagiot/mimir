@@ -8,13 +8,14 @@ package distributor
 import (
 	"bytes"
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"math/rand"
 	"net/http"
 	"strconv"
 	"sync"
+
+	"github.com/pkg/errors"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
@@ -129,6 +130,18 @@ func handler(
 		supplier := func() (*mimirpb.WriteRequest, func(), error) {
 			rb := util.NewRequestBuffers(&bufferPool)
 			var req mimirpb.PreallocWriteRequest
+
+			userID, err := tenant.TenantID(ctx)
+			if err != nil {
+				return nil, nil, errors.Wrap(err, "failed to get tenant ID")
+			}
+
+			if limits.MaxGlobalExemplarsPerUser(userID) == 0 {
+				// The user is not allowed to send exemplars, so there is no need to unmarshal them.
+				// Optimization to avoid the allocations required for unmarshaling exemplars.
+				req.SkipExemplars = true
+			}
+
 			if err := parser(ctx, r, maxRecvMsgSize, rb, &req, logger); err != nil {
 				// Check for httpgrpc error, default to client error if parsing failed
 				if _, ok := httpgrpc.HTTPResponseFromError(err); !ok {

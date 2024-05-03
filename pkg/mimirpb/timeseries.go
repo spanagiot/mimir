@@ -56,11 +56,19 @@ var (
 // PreallocWriteRequest is a WriteRequest which preallocs slices on Unmarshal.
 type PreallocWriteRequest struct {
 	WriteRequest
+
+	// SkipExemplars is an optimization to not unmarshal exemplars when they are disabled by the config anyway.
+	SkipExemplars bool
 }
 
 // Unmarshal implements proto.Message.
 func (p *PreallocWriteRequest) Unmarshal(dAtA []byte) error {
 	p.Timeseries = PreallocTimeseriesSliceFromPool()
+
+	for i := range p.Timeseries {
+		p.Timeseries[i].skipExemplars = p.SkipExemplars
+	}
+
 	return p.WriteRequest.Unmarshal(dAtA)
 }
 
@@ -83,6 +91,8 @@ type PreallocTimeseries struct {
 	// Original data used for unmarshalling this PreallocTimeseries. When set, Marshal methods will return it
 	// instead of doing full marshalling again. This assumes that this instance hasn't changed.
 	marshalledData []byte
+
+	skipExemplars bool
 }
 
 // RemoveLabel removes the label labelName from this timeseries, if it exists.
@@ -182,7 +192,27 @@ func (p *PreallocTimeseries) Unmarshal(dAtA []byte) error {
 		p.marshalledData = dAtA
 	}
 	p.TimeSeries = TimeseriesFromPool()
-	return p.TimeSeries.Unmarshal(dAtA)
+
+	if !p.skipExemplars {
+		return p.TimeSeries.Unmarshal(dAtA)
+	}
+
+	// Skip exemplars enabled, unmarshal into TimeSeriesNoExemplars to skip unmarshalling exemplars.
+	var timeSeries TimeSeriesNoExemplars
+	timeSeries.Labels = p.TimeSeries.Labels
+	timeSeries.Samples = p.TimeSeries.Samples
+	timeSeries.Histograms = p.TimeSeries.Histograms
+	err := timeSeries.Unmarshal(dAtA)
+	if err != nil {
+		return err
+	}
+
+	p.TimeSeries.Labels = timeSeries.Labels
+	p.TimeSeries.Samples = timeSeries.Samples
+	p.TimeSeries.Exemplars = p.TimeSeries.Exemplars[:0]
+	p.TimeSeries.Histograms = timeSeries.Histograms
+
+	return nil
 }
 
 func (p *PreallocTimeseries) Size() int {
