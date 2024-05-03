@@ -17,14 +17,14 @@ func MoreLoadHandler(w http.ResponseWriter, _ *http.Request) {
 	load := make(chan int64)
 	moreLoad <- load
 	currentLoad := <-load
-	w.Write([]byte("Load created. Total running: " + string(currentLoad)))
+	w.Write([]byte(fmt.Sprintf("Load created. Total running: %d", currentLoad)))
 }
 
 func LessLoadHandler(w http.ResponseWriter, _ *http.Request) {
 	load := make(chan int64)
 	lessLoad <- load
 	currentLoad := <-load
-	w.Write([]byte("Load stopped. Total running: " + string(currentLoad)))
+	w.Write([]byte(fmt.Sprintf("Load stopped. Total running: %d", currentLoad)))
 }
 
 func init() {

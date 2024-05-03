@@ -3800,8 +3800,8 @@ func getRequestID(ctx context.Context) string {
 	requestID := "unknown"
 	md, ok := metadata.FromIncomingContext(ctx)
 	if ok {
-		reqIDs, ok := md["requestID"]
-		if ok {
+		reqIDs := md.Get("request-id")
+		if len(reqIDs) == 1 {
 			requestID = reqIDs[0]
 		}
 	}
