@@ -46,6 +46,7 @@ import (
 	"go.uber.org/atomic"
 	"golang.org/x/exp/slices"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc/metadata"
 
 	"github.com/grafana/mimir/pkg/cardinality"
 	ingester_client "github.com/grafana/mimir/pkg/ingester/client"
@@ -1542,6 +1543,17 @@ func (d *Distributor) sendWriteRequestToBackends(ctx context.Context, tenantID s
 	return ingestersErr
 }
 
+var letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+func randomString(n int) string {
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letters[r.Intn(len(letters))]
+	}
+	return string(b)
+}
+
 func (d *Distributor) sendWriteRequestToIngesters(ctx context.Context, tenantRing ring.DoBatchRing, req *mimirpb.WriteRequest, keys []uint32, initialMetadataIndex int, remoteRequestContext func() context.Context, batchOptions ring.DoBatchOptions) error {
 	err := ring.DoBatchWithOptions(ctx, ring.WriteNoExtend, tenantRing, keys,
 		func(ingester ring.InstanceDesc, indexes []int) error {
@@ -1555,6 +1567,30 @@ func (d *Distributor) sendWriteRequestToIngesters(ctx context.Context, tenantRin
 
 			ctx := remoteRequestContext()
 			ctx = grpcutil.AppendMessageSizeToOutgoingContext(ctx, req) // Let ingester know the size of the message, without needing to read the message first.
+			requestID := randomString(20)
+			ctx = metadata.AppendToOutgoingContext(ctx, "requestID", requestID)
+
+			var (
+				currentTimeout = "unknown"
+				remainingTime  = "unknown"
+				reqID          = "unknown"
+			)
+
+			cT, ok := ctx.Deadline()
+			if ok {
+				currentTimeout = cT.String()
+				remainingTime = fmt.Sprintf("%d", time.Until(cT).Milliseconds())
+			}
+
+			md, ok := metadata.FromIncomingContext(ctx)
+			if ok {
+				reqIDs, ok := md["requestID"]
+				if ok {
+					reqID = reqIDs[0]
+				}
+			}
+
+			level.Info(d.log).Log("msg", "sendWriteRequestToIngesters is pushing data", "ingester", ingester.Id, "currentTimeout", currentTimeout, "remainingTime", remainingTime, "requestID", reqID)
 
 			_, err = c.Push(ctx, req)
 			err = wrapIngesterPushError(err, ingester.Id)
