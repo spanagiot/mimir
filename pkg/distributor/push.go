@@ -23,6 +23,7 @@ import (
 	"github.com/grafana/dskit/httpgrpc/server"
 	"github.com/grafana/dskit/middleware"
 	"github.com/grafana/dskit/tenant"
+	"github.com/grafana/dskit/user"
 	"github.com/opentracing/opentracing-go"
 
 	"github.com/grafana/mimir/pkg/mimirpb"
@@ -132,14 +133,15 @@ func handler(
 			var req mimirpb.PreallocWriteRequest
 
 			userID, err := tenant.TenantID(ctx)
-			if err != nil {
+			if err != nil && !errors.Is(err, user.ErrNoOrgID) { // ignore user.ErrNoOrgID
 				return nil, nil, errors.Wrap(err, "failed to get tenant ID")
 			}
 
+			// userID might be empty if none was in the ctx, in this case just use the default setting.
 			if limits.MaxGlobalExemplarsPerUser(userID) == 0 {
 				// The user is not allowed to send exemplars, so there is no need to unmarshal them.
 				// Optimization to avoid the allocations required for unmarshaling exemplars.
-				req.SkipExemplars = true
+				req.SkipUnmarshalingExemplars = true
 			}
 
 			if err := parser(ctx, r, maxRecvMsgSize, rb, &req, logger); err != nil {
