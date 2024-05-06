@@ -601,6 +601,143 @@ func TestHandler_EnsureSkipLabelNameValidationBehaviour(t *testing.T) {
 	}
 }
 
+func TestHandler_SkipExemplarUnmarshalingBasedOnLimits(t *testing.T) {
+	timestampMs := time.Now().UnixMilli()
+
+	tests := []struct {
+		name                      string
+		submitTimeseries          mimirpb.TimeSeries
+		expectTimeseries          mimirpb.TimeSeries
+		maxGlobalExemplarsPerUser int
+	}{
+		{
+			name: "request with exemplars and exemplars are enabled",
+			submitTimeseries: mimirpb.TimeSeries{
+				Labels: []mimirpb.LabelAdapter{
+					{Name: "label1", Value: "value1"},
+				},
+				Samples: []mimirpb.Sample{
+					{Value: 1, TimestampMs: timestampMs},
+				},
+				Exemplars: []mimirpb.Exemplar{
+					{Labels: []mimirpb.LabelAdapter{{Name: "label1", Value: "value1"}}, Value: 1, TimestampMs: timestampMs},
+					{Labels: []mimirpb.LabelAdapter{{Name: "label2", Value: "value2"}}, Value: 2, TimestampMs: timestampMs},
+					{Labels: []mimirpb.LabelAdapter{{Name: "label3", Value: "value3"}}, Value: 3, TimestampMs: timestampMs},
+				},
+				Histograms: []mimirpb.Histogram{{Sum: 1, Schema: 2, ZeroThreshold: 3, ResetHint: 4, Timestamp: 5}},
+			},
+			maxGlobalExemplarsPerUser: 1, // exemplars are not disabled
+			expectTimeseries: mimirpb.TimeSeries{
+				Labels: []mimirpb.LabelAdapter{
+					{Name: "label1", Value: "value1"},
+				},
+				Samples: []mimirpb.Sample{
+					{Value: 1, TimestampMs: timestampMs},
+				},
+				Exemplars: []mimirpb.Exemplar{
+					{Labels: []mimirpb.LabelAdapter{{Name: "label1", Value: "value1"}}, Value: 1, TimestampMs: timestampMs},
+					{Labels: []mimirpb.LabelAdapter{{Name: "label2", Value: "value2"}}, Value: 2, TimestampMs: timestampMs},
+					{Labels: []mimirpb.LabelAdapter{{Name: "label3", Value: "value3"}}, Value: 3, TimestampMs: timestampMs},
+				},
+				Histograms: []mimirpb.Histogram{{Sum: 1, Schema: 2, ZeroThreshold: 3, ResetHint: 4, Timestamp: 5}},
+			},
+		}, {
+			name: "request with exemplars and exemplars are disabled",
+			submitTimeseries: mimirpb.TimeSeries{
+				Labels: []mimirpb.LabelAdapter{
+					{Name: "label1", Value: "value1"},
+				},
+				Samples: []mimirpb.Sample{
+					{Value: 1, TimestampMs: timestampMs},
+				},
+				Exemplars: []mimirpb.Exemplar{
+					{Labels: []mimirpb.LabelAdapter{{Name: "label1", Value: "value1"}}, Value: 1, TimestampMs: timestampMs},
+					{Labels: []mimirpb.LabelAdapter{{Name: "label2", Value: "value2"}}, Value: 2, TimestampMs: timestampMs},
+					{Labels: []mimirpb.LabelAdapter{{Name: "label3", Value: "value3"}}, Value: 3, TimestampMs: timestampMs},
+				},
+				Histograms: []mimirpb.Histogram{{Sum: 1, Schema: 2, ZeroThreshold: 3, ResetHint: 4, Timestamp: 5}},
+			},
+			maxGlobalExemplarsPerUser: 0, // 0 disables exemplars
+			expectTimeseries: mimirpb.TimeSeries{
+				Labels: []mimirpb.LabelAdapter{
+					{Name: "label1", Value: "value1"},
+				},
+				Samples: []mimirpb.Sample{
+					{Value: 1, TimestampMs: timestampMs},
+				},
+				Exemplars:  []mimirpb.Exemplar{},
+				Histograms: []mimirpb.Histogram{{Sum: 1, Schema: 2, ZeroThreshold: 3, ResetHint: 4, Timestamp: 5}},
+			},
+		}, {
+			name: "request without exemplars and exemplars are enabled",
+			submitTimeseries: mimirpb.TimeSeries{
+				Labels: []mimirpb.LabelAdapter{
+					{Name: "label1", Value: "value1"},
+				},
+				Samples: []mimirpb.Sample{
+					{Value: 1, TimestampMs: timestampMs},
+				},
+				Exemplars:  []mimirpb.Exemplar{},
+				Histograms: []mimirpb.Histogram{{Sum: 1, Schema: 2, ZeroThreshold: 3, ResetHint: 4, Timestamp: 5}},
+			},
+			maxGlobalExemplarsPerUser: 1, // exemplars are not disabled
+			expectTimeseries: mimirpb.TimeSeries{
+				Labels: []mimirpb.LabelAdapter{
+					{Name: "label1", Value: "value1"},
+				},
+				Samples: []mimirpb.Sample{
+					{Value: 1, TimestampMs: timestampMs},
+				},
+				Exemplars:  []mimirpb.Exemplar{},
+				Histograms: []mimirpb.Histogram{{Sum: 1, Schema: 2, ZeroThreshold: 3, ResetHint: 4, Timestamp: 5}},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tenant := "my_test_tenant"
+			reqDecoded := mimirpb.WriteRequest{
+				Timeseries: []mimirpb.PreallocTimeseries{{TimeSeries: &tc.submitTimeseries}},
+				Source:     mimirpb.RULE,
+			}
+			reqEncoded, err := reqDecoded.Marshal()
+			require.NoError(t, err)
+			reqHTTP := createRequest(t, reqEncoded)
+
+			ctx := user.InjectOrgID(context.Background(), tenant)
+			err = user.InjectOrgIDIntoHTTPRequest(ctx, reqHTTP)
+			require.NoError(t, err)
+
+			limits := validation.MockOverrides(func(defaults *validation.Limits, tenantLimits map[string]*validation.Limits) {
+				tenantLimits[tenant] = &validation.Limits{
+					MaxGlobalExemplarsPerUser: tc.maxGlobalExemplarsPerUser,
+				}
+			})
+
+			var gotReqEncoded *Request
+			handler := Handler(100000, nil, true, limits, RetryConfig{}, func(_ context.Context, pushReq *Request) error {
+				gotReqEncoded = pushReq
+				return nil
+			}, log.NewNopLogger())
+
+			// Add tenant to the context to be able to lookup limits.
+			handler = middleware.AuthenticateUser.Wrap(handler)
+
+			resp := httptest.NewRecorder()
+			handler.ServeHTTP(resp, reqHTTP)
+			require.Equal(t, http.StatusOK, resp.Code)
+
+			gotReq, err := gotReqEncoded.WriteRequest()
+			require.NoError(t, err)
+
+			assert.Len(t, gotReq.Timeseries, 1)
+			gotTimeseries := *(gotReq.Timeseries[0].TimeSeries)
+
+			assert.EqualValues(t, tc.expectTimeseries, gotTimeseries)
+		})
+	}
+}
+
 func verifyWritePushFunc(t *testing.T, expectSource mimirpb.WriteRequest_SourceEnum) PushFunc {
 	t.Helper()
 	return func(_ context.Context, pushReq *Request) error {
