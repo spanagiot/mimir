@@ -65,6 +65,8 @@ type PreallocWriteRequest struct {
 // Copied from generated code, the only change is the addition that
 // propagates SkipUnmarshalingExemplars into the .Timeseries slice objects.
 func (p *PreallocWriteRequest) Unmarshal(dAtA []byte) error {
+	p.Timeseries = PreallocTimeseriesSliceFromPool()
+
 	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
