@@ -111,7 +111,7 @@ func isFailure(err error) bool {
 	// to be errors worthy of tripping the circuit breaker since these
 	// are specific to a particular ingester, not a user or request.
 
-	if errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return true
 	}
 
