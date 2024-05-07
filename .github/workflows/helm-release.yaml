@@ -5,10 +5,11 @@ on:
     branches:
       - main
       - "mimir-distributed-release-[0-9]+.[0-9]+"
+      - test-gh-update-helm-chart
 
 jobs:
   call-update-helm-repo:
-    uses: grafana/helm-charts/.github/workflows/update-helm-repo.yaml@main
+    uses: grafana/helm-charts/.github/workflows/update-helm-repo.yaml@update-helm-repo-fix-deps
     with:
       charts_dir: operations/helm/charts
       cr_configfile: operations/helm/cr.yaml
