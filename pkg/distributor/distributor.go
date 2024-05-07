@@ -1587,6 +1587,14 @@ func (d *Distributor) sendWriteRequestToIngesters(ctx context.Context, tenantRin
 			err = wrapIngesterPushError(err, ingester.Id)
 			err = wrapDeadlineExceededPushError(err)
 
+			if err != nil {
+				remainingTime = fmt.Sprintf("%d", time.Until(cT).Milliseconds())
+				level.Error(d.log).Log("msg", "sendWriteRequestToIngesters didn't push data", "ingester", ingester.Id, "currentTimeout", currentTimeout, "remainingTime", remainingTime, "requestID", requestID, "err", err)
+			} else {
+				remainingTime = fmt.Sprintf("%d", time.Until(cT).Milliseconds())
+				level.Info(d.log).Log("msg", "sendWriteRequestToIngesters correctly pushed data", "ingester", ingester.Id, "currentTimeout", currentTimeout, "remainingTime", remainingTime, "requestID", requestID)
+			}
+
 			return err
 		}, batchOptions)
 
