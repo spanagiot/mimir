@@ -111,7 +111,7 @@ func isFailure(err error) bool {
 	// to be errors worthy of tripping the circuit breaker since these
 	// are specific to a particular ingester, not a user or request.
 
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
 
@@ -135,26 +135,29 @@ func (cb *circuitBreaker) metrics() *ingesterMetrics {
 	return cb.ingester.metrics
 }
 
-func (cb *circuitBreaker) Run(f func() error) error {
-	err := cb.executor.Run(f)
-
-	if err != nil && errors.Is(err, circuitbreaker.ErrOpen) {
-		cb.metrics().circuitBreakerResults.WithLabelValues(cb.ingesterID(), resultOpen).Inc()
-		return newErrorWithStatus(newCircuitBreakerOpenError(cb.RemainingDelay()), codes.Unavailable)
-	}
-	return err
-}
-
 func (cb *circuitBreaker) run(ctx context.Context, f func() error) error {
 	err := cb.executor.Run(f)
 	if err != nil && errors.Is(err, circuitbreaker.ErrOpen) {
 		cb.metrics().circuitBreakerResults.WithLabelValues(cb.ingesterID(), resultOpen).Inc()
 		return newErrorWithStatus(newCircuitBreakerOpenError(cb.RemainingDelay()), codes.Unavailable)
 	}
-	requestID := getRequestID(ctx)
+	return cb.processError(ctx, err)
+}
+
+func (cb *circuitBreaker) get(ctx context.Context, f func() (any, error)) (any, error) {
+	res, err := cb.executor.Get(f)
+	if err != nil && errors.Is(err, circuitbreaker.ErrOpen) {
+		cb.metrics().circuitBreakerResults.WithLabelValues(cb.ingesterID(), resultOpen).Inc()
+		return res, newErrorWithStatus(newCircuitBreakerOpenError(cb.RemainingDelay()), codes.Unavailable)
+	}
+	return res, cb.processError(ctx, err)
+}
+
+func (cb *circuitBreaker) processError(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
+	requestID := getRequestID(ctx)
 	if err == ctx.Err() {
 		level.Error(cb.logger()).Log("msg", "Run's callback completed with an error found in the context", "ingester", cb.ingesterID(), "ctxErr", ctx.Err(), "ingesterState", cb.ingester.State().String(), "requestID", requestID, "ingesterState", cb.ingester.State().String())
 		// ctx.Err() was registered with the circuit breaker's executor, but we don't propagate it
@@ -165,23 +168,39 @@ func (cb *circuitBreaker) run(ctx context.Context, f func() error) error {
 	return err
 }
 
+func nonCancelableContext(parent context.Context) context.Context {
+	ctx := parent
+	if deadline, ok := parent.Deadline(); ok {
+		ctx, _ = context.WithDeadline(context.WithoutCancel(parent), deadline)
+		if requestID := getRequestID(ctx); requestID == "unknown" {
+			ctx = context.WithValue(ctx, "request-id", getRequestID(parent))
+		}
+	}
+	return ctx
+}
+
 func (cb *circuitBreaker) Push(ctx context.Context, req *mimirpb.WriteRequest) (*mimirpb.WriteResponse, error) {
-	var callbackResult *mimirpb.WriteResponse
-	err := cb.run(ctx, func() error {
-		var callbackErr error
-		callbackResult, callbackErr = cb.ingester.push(ctx, req)
+	ctx = nonCancelableContext(ctx)
+
+	callbackResult, callbackErr := cb.get(ctx, func() (any, error) {
+		callbackResult, callbackErr := cb.ingester.push(ctx, req)
 		if callbackErr != nil {
-			return callbackErr
+			return callbackResult, callbackErr
 		}
 		// We return ctx.Err() in order to register it with the circuit breaker's executor
-		return ctx.Err()
+		return callbackResult, ctx.Err()
 	})
 
-	return callbackResult, err
+	if callbackResult == nil {
+		return nil, callbackErr
+	}
+	return callbackResult.(*mimirpb.WriteResponse), callbackErr
 }
 
 func (cb *circuitBreaker) QueryStream(ctx context.Context, req *client.QueryRequest, stream client.Ingester_QueryStreamServer, spanlog *spanlogger.SpanLogger) error {
-	err := cb.run(ctx, func() error {
+	ctx = nonCancelableContext(ctx)
+
+	return cb.run(ctx, func() error {
 		err := cb.ingester.queryStream(ctx, req, stream, spanlog)
 		if err != nil {
 			return err
@@ -189,6 +208,4 @@ func (cb *circuitBreaker) QueryStream(ctx context.Context, req *client.QueryRequ
 		// We return ctx.Err() in order to register it with the circuit breaker's executor
 		return ctx.Err()
 	})
-
-	return err
 }
