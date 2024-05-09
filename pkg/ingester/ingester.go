@@ -2012,7 +2012,7 @@ func (i *Ingester) QueryStream(req *client.QueryRequest, stream client.Ingester_
 	spanlog, ctx := spanlogger.NewWithLogger(stream.Context(), i.logger, "Ingester.QueryStream")
 	defer spanlog.Finish()
 
-	if i.circuitBreaker != nil {
+	if i.isCircuitBreakerActive() {
 		return i.circuitBreaker.QueryStream(ctx, req, stream, spanlog)
 	}
 	return i.queryStream(ctx, req, stream, spanlog)
@@ -3783,9 +3783,16 @@ func getRequestID(ctx context.Context) string {
 	return requestID
 }
 
+func (i *Ingester) isCircuitBreakerActive() bool {
+	if i.circuitBreaker == nil {
+		return false
+	}
+	return i.circuitBreaker.startTime.Before(time.Now())
+}
+
 // Push implements client.IngesterServer, which is registered into gRPC server.
 func (i *Ingester) Push(ctx context.Context, req *mimirpb.WriteRequest) (*mimirpb.WriteResponse, error) {
-	if i.circuitBreaker != nil {
+	if i.isCircuitBreakerActive() {
 		return i.circuitBreaker.Push(ctx, req)
 	}
 	return i.push(ctx, req)

@@ -32,6 +32,7 @@ type CircuitBreakerConfig struct {
 	FailureExecutionThreshold uint          `yaml:"failure_execution_threshold" category:"experimental"`
 	ThresholdingPeriod        time.Duration `yaml:"thresholding_period" category:"experimental"`
 	CooldownPeriod            time.Duration `yaml:"cooldown_period" category:"experimental"`
+	InitialDelay              time.Duration `yaml:"initial_delay" category:"experimental"`
 	testModeEnabled           bool          `yaml:"-"`
 }
 
@@ -42,6 +43,7 @@ func (cfg *CircuitBreakerConfig) RegisterFlags(f *flag.FlagSet) {
 	f.UintVar(&cfg.FailureExecutionThreshold, prefix+"failure-execution-threshold", 100, "How many requests must have been executed in period for the circuit breaker to be eligible to open for the rate of failures")
 	f.DurationVar(&cfg.ThresholdingPeriod, prefix+"thresholding-period", time.Minute, "Moving window of time that the percentage of failed requests is computed over")
 	f.DurationVar(&cfg.CooldownPeriod, prefix+"cooldown-period", 10*time.Second, "How long the circuit breaker will stay in the open state before allowing some requests")
+	f.DurationVar(&cfg.InitialDelay, prefix+"initial-delay", 0, "How long the circuit breaker should wait between creation and starting up. During that time both failures and successes will not be counted.")
 }
 
 func (cfg *CircuitBreakerConfig) Validate() error {
@@ -50,8 +52,9 @@ func (cfg *CircuitBreakerConfig) Validate() error {
 
 type circuitBreaker struct {
 	circuitbreaker.CircuitBreaker[any]
-	ingester *Ingester
-	executor failsafe.Executor[any]
+	ingester  *Ingester
+	executor  failsafe.Executor[any]
+	startTime time.Time
 }
 
 func newCircuitBreaker(ingester *Ingester) *circuitBreaker {
@@ -99,6 +102,7 @@ func newCircuitBreaker(ingester *Ingester) *circuitBreaker {
 		CircuitBreaker: cb,
 		ingester:       ingester,
 		executor:       failsafe.NewExecutor[any](cb),
+		startTime:      time.Now().Add(cfg.InitialDelay),
 	}
 }
 
