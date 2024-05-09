@@ -3190,6 +3190,17 @@
               "fieldFlag": "ingester.circuit-breaker.cooldown-period",
               "fieldType": "duration",
               "fieldCategory": "experimental"
+            },
+            {
+              "kind": "field",
+              "name": "initial_delay",
+              "required": false,
+              "desc": "How long the circuit breaker should wait between creation and starting up. During that time both failures and successes will not be counted.",
+              "fieldValue": null,
+              "fieldDefaultValue": 0,
+              "fieldFlag": "ingester.circuit-breaker.initial-delay",
+              "fieldType": "duration",
+              "fieldCategory": "experimental"
             }
           ],
           "fieldValue": null,
