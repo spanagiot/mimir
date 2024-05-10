@@ -24,6 +24,7 @@ import (
 )
 
 func TestIngester_Push_CircuitBreaker(t *testing.T) {
+	pushTimeout := 100 * time.Millisecond
 	tests := map[string]struct {
 		expectedErrorWhenCircuitBreakerClosed error
 		ctx                                   func(context.Context) context.Context
@@ -33,9 +34,7 @@ func TestIngester_Push_CircuitBreaker(t *testing.T) {
 			expectedErrorWhenCircuitBreakerClosed: nil,
 			limits:                                InstanceLimits{MaxInMemoryTenants: 3},
 			ctx: func(ctx context.Context) context.Context {
-				ctx, _ = context.WithTimeout(ctx, time.Millisecond)
-				time.Sleep(2 * time.Millisecond)
-				return ctx
+				return context.WithValue(ctx, testDelayKey, (2 * pushTimeout).String())
 			},
 		},
 		"instance limit hit": {
@@ -71,6 +70,7 @@ func TestIngester_Push_CircuitBreaker(t *testing.T) {
 					FailureThreshold: uint(failureThreshold),
 					CooldownPeriod:   10 * time.Second,
 					InitialDelay:     initialDelay,
+					PushTimeout:      pushTimeout,
 					testModeEnabled:  true,
 				}
 
@@ -178,6 +178,7 @@ func TestIngester_Push_CircuitBreaker(t *testing.T) {
 }
 
 func TestIngester_QueryStream_CircuitBreaker(t *testing.T) {
+	queryStreamTimeout := 100 * time.Millisecond
 	tests := map[string]struct {
 		expectedErrorWhenCircuitBreakerClosed error
 		ctx                                   func(context.Context) context.Context
@@ -185,9 +186,7 @@ func TestIngester_QueryStream_CircuitBreaker(t *testing.T) {
 		"deadline exceeded": {
 			expectedErrorWhenCircuitBreakerClosed: nil,
 			ctx: func(ctx context.Context) context.Context {
-				ctx, _ = context.WithTimeout(ctx, time.Millisecond)
-				time.Sleep(2 * time.Millisecond)
-				return ctx
+				return context.WithValue(ctx, testDelayKey, (2 * queryStreamTimeout).String())
 			},
 		},
 	}
@@ -212,11 +211,12 @@ func TestIngester_QueryStream_CircuitBreaker(t *testing.T) {
 					initialDelay = 200 * time.Millisecond
 				}
 				cfg.CircuitBreakerConfig = CircuitBreakerConfig{
-					Enabled:          true,
-					FailureThreshold: uint(failureThreshold),
-					CooldownPeriod:   10 * time.Second,
-					InitialDelay:     initialDelay,
-					testModeEnabled:  true,
+					Enabled:            true,
+					FailureThreshold:   uint(failureThreshold),
+					CooldownPeriod:     10 * time.Second,
+					InitialDelay:       initialDelay,
+					QueryStreamTimeout: queryStreamTimeout,
+					testModeEnabled:    true,
 				}
 
 				i, err := prepareIngesterWithBlocksStorage(t, cfg, nil, registry)

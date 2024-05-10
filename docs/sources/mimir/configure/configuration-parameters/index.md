@@ -1238,6 +1238,20 @@ circuit_breaker:
   # counted.
   # CLI flag: -ingester.circuit-breaker.initial-delay
   [initial_delay: <duration> | default = 0s]
+
+  # (experiment) How long is execution of ingester's Push supposed to last
+  # before it is reported as timeout in a circuit breaker. This configuration is
+  # used for circuit breakers only, and timeout expirations are not reported as
+  # errors
+  # CLI flag: -ingester.circuit-breaker.push-timeout
+  [push_timeout: <duration> | default = 0s]
+
+  # (experiment) How long is execution of ingester's QueryStream supposed to
+  # last before it is reported as timeout in a circuit breaker. This
+  # configuration is used for circuit breakers only, and timeout expirations are
+  # not reported as errors
+  # CLI flag: -ingester.circuit-breaker.query-stream-timeout
+  [query_stream_timeout: <duration> | default = 0s]
 ```
 
 ### querier
