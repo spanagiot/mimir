@@ -21,9 +21,11 @@ import (
 )
 
 const (
-	resultSuccess = "success"
-	resultError   = "error"
-	resultOpen    = "circuit_breaker_open"
+	resultSuccess  = "success"
+	resultError    = "error"
+	resultOpen     = "circuit_breaker_open"
+	defaultTimeout = 2 * time.Second
+	testDelayKey   = "test-delay"
 )
 
 type CircuitBreakerConfig struct {
@@ -33,6 +35,8 @@ type CircuitBreakerConfig struct {
 	ThresholdingPeriod        time.Duration `yaml:"thresholding_period" category:"experimental"`
 	CooldownPeriod            time.Duration `yaml:"cooldown_period" category:"experimental"`
 	InitialDelay              time.Duration `yaml:"initial_delay" category:"experimental"`
+	PushTimeout               time.Duration `yaml:"push_timeout" category:"experiment"`
+	QueryStreamTimeout        time.Duration `yaml:"query_stream_timeout" category:"experiment"`
 	testModeEnabled           bool          `yaml:"-"`
 }
 
@@ -44,6 +48,8 @@ func (cfg *CircuitBreakerConfig) RegisterFlags(f *flag.FlagSet) {
 	f.DurationVar(&cfg.ThresholdingPeriod, prefix+"thresholding-period", time.Minute, "Moving window of time that the percentage of failed requests is computed over")
 	f.DurationVar(&cfg.CooldownPeriod, prefix+"cooldown-period", 10*time.Second, "How long the circuit breaker will stay in the open state before allowing some requests")
 	f.DurationVar(&cfg.InitialDelay, prefix+"initial-delay", 0, "How long the circuit breaker should wait between creation and starting up. During that time both failures and successes will not be counted.")
+	f.DurationVar(&cfg.PushTimeout, prefix+"push-timeout", 0, "How long is execution of ingester's Push supposed to last before it is reported as timeout in a circuit breaker. This configuration is used for circuit breakers only, and timeout expirations are not reported as errors")
+	f.DurationVar(&cfg.QueryStreamTimeout, prefix+"query-stream-timeout", 0, "How long is execution of ingester's QueryStream supposed to last before it is reported as timeout in a circuit breaker. This configuration is used for circuit breakers only, and timeout expirations are not reported as errors")
 }
 
 func (cfg *CircuitBreakerConfig) Validate() error {
@@ -139,6 +145,10 @@ func (cb *circuitBreaker) metrics() *ingesterMetrics {
 	return cb.ingester.metrics
 }
 
+func (cb *circuitBreaker) config() CircuitBreakerConfig {
+	return cb.ingester.cfg.CircuitBreakerConfig
+}
+
 func (cb *circuitBreaker) run(ctx context.Context, f func() error) error {
 	err := cb.executor.Run(f)
 	if err != nil && errors.Is(err, circuitbreaker.ErrOpen) {
@@ -172,19 +182,27 @@ func (cb *circuitBreaker) processError(ctx context.Context, err error) error {
 	return err
 }
 
-func nonCancelableContext(parent context.Context) context.Context {
-	ctx := parent
-	if deadline, ok := parent.Deadline(); ok {
-		ctx, _ = context.WithDeadline(context.WithoutCancel(parent), deadline)
-		if requestID := getRequestID(ctx); requestID == "unknown" {
-			ctx = context.WithValue(ctx, "request-id", getRequestID(parent))
+func (cb *circuitBreaker) contextWithTimeout(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout == 0 {
+		timeout = defaultTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), timeout)
+	if requestID := getRequestID(ctx); requestID == "unknown" {
+		ctx = context.WithValue(ctx, "request-id", getRequestID(parent))
+	}
+	if cb.config().testModeEnabled {
+		if initialDelay, ok := parent.Value(testDelayKey).(string); ok {
+			if d, err := time.ParseDuration(initialDelay); err == nil {
+				time.Sleep(d)
+			}
 		}
 	}
-	return ctx
+	return ctx, cancel
 }
 
-func (cb *circuitBreaker) Push(ctx context.Context, req *mimirpb.WriteRequest) (*mimirpb.WriteResponse, error) {
-	ctx = nonCancelableContext(ctx)
+func (cb *circuitBreaker) Push(parent context.Context, req *mimirpb.WriteRequest) (*mimirpb.WriteResponse, error) {
+	ctx, cancel := cb.contextWithTimeout(parent, cb.config().PushTimeout)
+	defer cancel()
 
 	callbackResult, callbackErr := cb.get(ctx, func() (any, error) {
 		callbackResult, callbackErr := cb.ingester.push(ctx, req)
@@ -201,8 +219,9 @@ func (cb *circuitBreaker) Push(ctx context.Context, req *mimirpb.WriteRequest) (
 	return callbackResult.(*mimirpb.WriteResponse), callbackErr
 }
 
-func (cb *circuitBreaker) QueryStream(ctx context.Context, req *client.QueryRequest, stream client.Ingester_QueryStreamServer, spanlog *spanlogger.SpanLogger) error {
-	ctx = nonCancelableContext(ctx)
+func (cb *circuitBreaker) QueryStream(parent context.Context, req *client.QueryRequest, stream client.Ingester_QueryStreamServer, spanlog *spanlogger.SpanLogger) error {
+	ctx, cancel := cb.contextWithTimeout(parent, cb.config().QueryStreamTimeout)
+	defer cancel()
 
 	return cb.run(ctx, func() error {
 		err := cb.ingester.queryStream(ctx, req, stream, spanlog)
