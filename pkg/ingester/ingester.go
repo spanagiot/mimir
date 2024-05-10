@@ -3818,7 +3818,7 @@ func (i *Ingester) push(ctx context.Context, req *mimirpb.WriteRequest) (*mimirp
 
 	level.Info(i.logger).Log("msg", "Push is being executed", "ingester", ingesterID, "currentTimeout", currentTimeout, "remainingTime", remainingTime, "requestID", requestID)
 
-	if deadlineExceedEnabled.Load() {
+	if shouldDelayPushRequest() {
 		userID, err := tenant.TenantID(ctx)
 		if err != nil {
 			return nil, err
