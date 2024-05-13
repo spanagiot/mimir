@@ -1701,6 +1701,28 @@
           "fieldFlag": "distributor.reusable-ingester-push-workers",
           "fieldType": "int",
           "fieldCategory": "advanced"
+        },
+        {
+          "kind": "field",
+          "name": "failing_ingesters_push_precedence_enabled",
+          "required": false,
+          "desc": "When enabled, distributors will try to execute push requests on the ingesters that failed in the previous executions.",
+          "fieldValue": null,
+          "fieldDefaultValue": false,
+          "fieldFlag": "distributor.failing-ingesters-push-precedence-enabled",
+          "fieldType": "boolean",
+          "fieldCategory": "experimental"
+        },
+        {
+          "kind": "field",
+          "name": "failing_ingesters_minimum_failures_percentage",
+          "required": false,
+          "desc": "Percentage of push requests that should fail on a single ingester to make it be considered a failing ingester. This configuration is relevant only when distributor.failing-ingesters-push-precedence-enabled is set to true.)",
+          "fieldValue": null,
+          "fieldDefaultValue": 0,
+          "fieldFlag": "distributor.failing-ingesters-minimum-failure-percentage",
+          "fieldType": "int",
+          "fieldCategory": "experimental"
         }
       ],
       "fieldValue": null,

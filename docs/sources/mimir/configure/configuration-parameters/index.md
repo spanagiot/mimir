@@ -955,6 +955,18 @@ instance_limits:
 # limiting feature.)
 # CLI flag: -distributor.reusable-ingester-push-workers
 [reusable_ingester_push_workers: <int> | default = 2000]
+
+# (experimental) When enabled, distributors will try to execute push requests on
+# the ingesters that failed in the previous executions.
+# CLI flag: -distributor.failing-ingesters-push-precedence-enabled
+[failing_ingesters_push_precedence_enabled: <boolean> | default = false]
+
+# (experimental) Percentage of push requests that should fail on a single
+# ingester to make it be considered a failing ingester. This configuration is
+# relevant only when distributor.failing-ingesters-push-precedence-enabled is
+# set to true.)
+# CLI flag: -distributor.failing-ingesters-minimum-failure-percentage
+[failing_ingesters_minimum_failures_percentage: <int> | default = 0]
 ```
 
 ### ingester

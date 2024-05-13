@@ -174,6 +174,22 @@ type Distributor struct {
 
 	// partitionsRing is the hash ring holding ingester partitions. It's used when ingest storage is enabled.
 	partitionsRing *ring.PartitionInstanceRing
+
+	failingIngestersMap   map[string]stat
+	failingIngestersMutex sync.Mutex
+}
+
+type stat struct {
+	executions int
+	failures   int
+}
+
+func (s stat) failureFrequency() float64 {
+	return float64(s.failures) / float64(s.executions)
+}
+
+func (s stat) String() string {
+	return fmt.Sprintf("stat[e: %d, f: %d, fr: %.3f", s.executions, s.failures, s.failureFrequency())
 }
 
 // Config contains the configuration required to
@@ -220,6 +236,9 @@ type Config struct {
 	WriteRequestsBufferPoolingEnabled           bool `yaml:"write_requests_buffer_pooling_enabled" category:"experimental"`
 	LimitInflightRequestsUsingGrpcMethodLimiter bool `yaml:"limit_inflight_requests_using_grpc_method_limiter" category:"deprecated"` // TODO Remove the configuration option in Mimir 2.14, keeping the same behavior as if it's enabled
 	ReusableIngesterPushWorkers                 int  `yaml:"reusable_ingester_push_workers" category:"advanced"`
+
+	FailingIngestersPushPrecedenceEnabled    bool `yaml:"failing_ingesters_push_precedence_enabled" category:"experimental"`
+	FailingIngestersMinimumFailurePercentage int  `yaml:"failing_ingesters_minimum_failures_percentage" category:"experimental""`
 }
 
 // PushWrapper wraps around a push. It is similar to middleware.Interface.
@@ -238,6 +257,9 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet, logger log.Logger) {
 	f.BoolVar(&cfg.WriteRequestsBufferPoolingEnabled, "distributor.write-requests-buffer-pooling-enabled", true, "Enable pooling of buffers used for marshaling write requests.")
 	f.BoolVar(&cfg.LimitInflightRequestsUsingGrpcMethodLimiter, "distributor.limit-inflight-requests-using-grpc-method-limiter", true, "When enabled, in-flight write requests limit is checked as soon as the gRPC request is received, before the request is decoded and parsed.")
 	f.IntVar(&cfg.ReusableIngesterPushWorkers, "distributor.reusable-ingester-push-workers", 2000, "Number of pre-allocated workers used to forward push requests to the ingesters. If 0, no workers will be used and a new goroutine will be spawned for each ingester push request. If not enough workers available, new goroutine will be spawned. (Note: this is a performance optimization, not a limiting feature.)")
+
+	f.BoolVar(&cfg.FailingIngestersPushPrecedenceEnabled, "distributor.failing-ingesters-push-precedence-enabled", false, "When enabled, distributors will try to execute push requests on the ingesters that failed in the previous executions.")
+	f.IntVar(&cfg.FailingIngestersMinimumFailurePercentage, "distributor.failing-ingesters-minimum-failure-percentage", 0, "Percentage of push requests that should fail on a single ingester to make it be considered a failing ingester. This configuration is relevant only when distributor.failing-ingesters-push-precedence-enabled is set to true.)")
 
 	cfg.DefaultLimits.RegisterFlags(f)
 }
@@ -433,6 +455,8 @@ func New(cfg Config, clientConfig ingester_client.Config, limits *validation.Ove
 		}),
 
 		PushMetrics: newPushMetrics(reg),
+
+		failingIngestersMap: make(map[string]stat),
 	}
 
 	// Initialize expected rejected request labels
@@ -1554,8 +1578,51 @@ func randomString(n int) string {
 	return string(b)
 }
 
+func (d *Distributor) isFrequentlyFailingIngester(ingester ring.InstanceDesc) bool {
+	d.failingIngestersMutex.Lock()
+	defer d.failingIngestersMutex.Unlock()
+
+	if s, found := d.failingIngestersMap[ingester.Id]; found {
+		return s.failureFrequency() >= float64(d.cfg.FailingIngestersMinimumFailurePercentage)/100.0
+	}
+	return false
+}
+
+func isCircuitBreakerOpenError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ingesterErr ingesterPushError
+	if errors.As(err, &ingesterErr) {
+		return ingesterErr.Cause() == mimirpb.CIRCUIT_BREAKER_OPEN
+	}
+	return false
+}
+
+func (d *Distributor) updateFrequentlyFailingIngesters(ingester ring.InstanceDesc, err error) {
+	d.failingIngestersMutex.Lock()
+	defer d.failingIngestersMutex.Unlock()
+
+	s, found := d.failingIngestersMap[ingester.Id]
+	if !found {
+		s = stat{}
+	}
+	s.executions++
+	if isCircuitBreakerOpenError(err) {
+		s.failures++
+	}
+	d.failingIngestersMap[ingester.Id] = s
+	m := fmt.Sprintf("%v", d.failingIngestersMap)
+	level.Info(d.log).Log("msg", "updated frequentlyFailingIngesters after an error in ingester", "ingester", ingester.Id, "err", err, "map", m)
+}
+
 func (d *Distributor) sendWriteRequestToIngesters(ctx context.Context, tenantRing ring.DoBatchRing, req *mimirpb.WriteRequest, keys []uint32, initialMetadataIndex int, remoteRequestContext func() context.Context, batchOptions ring.DoBatchOptions) error {
 	requestID := randomString(20)
+
+	if d.cfg.FailingIngestersPushPrecedenceEnabled {
+		batchOptions.IsFrequentlyFailingInstance = d.isFrequentlyFailingIngester
+	}
+
 	err := ring.DoBatchWithOptions(ctx, ring.WriteNoExtend, tenantRing, keys,
 		func(ingester ring.InstanceDesc, indexes []int) error {
 			req := req.ForIndexes(indexes, initialMetadataIndex)
@@ -1586,6 +1653,10 @@ func (d *Distributor) sendWriteRequestToIngesters(ctx context.Context, tenantRin
 			_, err = c.Push(ctx, req)
 			err = wrapIngesterPushError(err, ingester.Id)
 			err = wrapDeadlineExceededPushError(err)
+
+			if d.cfg.FailingIngestersPushPrecedenceEnabled {
+				d.updateFrequentlyFailingIngesters(ingester, err)
+			}
 
 			if err != nil {
 				remainingTime = fmt.Sprintf("%d", time.Until(cT).Milliseconds())

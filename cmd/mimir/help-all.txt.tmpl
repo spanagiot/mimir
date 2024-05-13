@@ -1099,6 +1099,10 @@ Usage of ./cmd/mimir/mimir:
     	This flag can be used to specify label names that to drop during sample ingestion within the distributor and can be repeated in order to drop multiple labels.
   -distributor.enable-otlp-metadata-storage
     	[deprecated] If true, store metadata when ingesting metrics via OTLP. This makes metric descriptions and types available for metrics ingested via OTLP. (default true)
+  -distributor.failing-ingesters-minimum-failure-percentage int
+    	[experimental] Percentage of push requests that should fail on a single ingester to make it be considered a failing ingester. This configuration is relevant only when distributor.failing-ingesters-push-precedence-enabled is set to true.)
+  -distributor.failing-ingesters-push-precedence-enabled
+    	[experimental] When enabled, distributors will try to execute push requests on the ingesters that failed in the previous executions.
   -distributor.ha-tracker.cluster string
     	Prometheus label to look for in samples to identify a Prometheus HA cluster. (default "cluster")
   -distributor.ha-tracker.consul.acl-token string
