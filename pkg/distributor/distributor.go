@@ -1592,9 +1592,9 @@ func isCircuitBreakerOpenError(err error) bool {
 	if err == nil {
 		return false
 	}
-	var ingesterErr ingesterPushError
-	if errors.As(err, &ingesterErr) {
-		return ingesterErr.Cause() == mimirpb.CIRCUIT_BREAKER_OPEN
+	var distributorErr Error
+	if errors.As(err, &distributorErr) {
+		return distributorErr.Cause() == mimirpb.CIRCUIT_BREAKER_OPEN
 	}
 	return false
 }
