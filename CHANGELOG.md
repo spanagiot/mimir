@@ -113,6 +113,7 @@
 * [ENHANCEMENT] `mimirtool promql format`: Format PromQL query with Prometheus' string or pretty-print formatter. #7742
 * [BUGFIX] `mimirtool rules prepare`: do not add aggregation label to `on()` clause if already present in `group_left()` or `group_right()`. #7839
 * [BUGFIX] Analyze Grafana: fix parsing queries with variables. #8062
+* [ENHANCEMENT] Add flag `--output-dir` and `--save-file` to `mimirtool rules get` to allow persisting rule to a file for edit and re-upload. #7247
 
 ### Mimir Continuous Test
 
@@ -344,7 +345,6 @@
 * [ENHANCEMENT] Add `--extra-headers` option to `mimirtool rules` command to add extra headers to requests for auth. #7141
 * [ENHANCEMENT] Analyze Prometheus: set tenant header. #6737
 * [ENHANCEMENT] Add argument `--output-dir` to `mimirtool alertmanager get` where the config and templates will be written to and can be loaded via `mimirtool alertmanager load` #6760
-* [ENHANCEMENT] Add flag `--output-dir` and `--save-file` to `mimirtool rules get` to allow persisting rule to a file for edit and re-upload. #7247
 * [BUGFIX] Analyze rule-file: .metricsUsed field wasn't populated. #6953
 
 ### Mimir Continuous Test
