@@ -975,6 +975,9 @@ type pushRequestState struct {
 // StartPushRequest checks if ingester can start push request, and increments relevant counters.
 // If new push request cannot be started, errors convertible to gRPC status code are returned, and metrics are updated.
 func (i *Ingester) StartPushRequest(ctx context.Context, reqSize int64) (context.Context, error) {
+	if i.isCircuitBreakerActive() {
+		return i.circuitBreaker.StartPushRequest(ctx, reqSize)
+	}
 	ctx, _, err := i.startPushRequest(ctx, reqSize)
 	return ctx, err
 }

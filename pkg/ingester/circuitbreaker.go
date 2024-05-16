@@ -200,6 +200,14 @@ func (cb *circuitBreaker) contextWithTimeout(parent context.Context, timeout tim
 	return ctx, cancel
 }
 
+func (cb *circuitBreaker) StartPushRequest(ctx context.Context, reqSize int64) (context.Context, error) {
+	callbackCtx, callbackErr := cb.get(ctx, func() (any, error) {
+		callbackCtx, _, callbackErr := cb.ingester.startPushRequest(ctx, reqSize)
+		return callbackCtx, callbackErr
+	})
+	return callbackCtx.(context.Context), callbackErr
+}
+
 func (cb *circuitBreaker) Push(parent context.Context, req *mimirpb.WriteRequest) (*mimirpb.WriteResponse, error) {
 	ctx, cancel := cb.contextWithTimeout(parent, cb.config().PushTimeout)
 	defer cancel()
