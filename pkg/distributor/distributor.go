@@ -1655,7 +1655,7 @@ func (d *Distributor) sendWriteRequestToIngesters(ctx context.Context, tenantRin
 			err = wrapDeadlineExceededPushError(err)
 
 			if d.cfg.FailingIngestersPushPrecedenceEnabled {
-				d.updateFrequentlyFailingIngesters(ingester, err)
+
 			}
 
 			if err != nil {
