@@ -9,6 +9,7 @@ import (
 	"github.com/failsafe-go/failsafe-go/circuitbreaker"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/grafana/dskit/middleware"
 	"github.com/pkg/errors"
 
 	"github.com/grafana/mimir/pkg/util/spanlogger"
@@ -153,7 +154,8 @@ func (cb *circuitBreaker) run(ctx context.Context, f func() error) error {
 	err := cb.executor.Run(f)
 	if err != nil && errors.Is(err, circuitbreaker.ErrOpen) {
 		cb.metrics().circuitBreakerResults.WithLabelValues(cb.ingesterID(), resultOpen).Inc()
-		return newErrorWithStatus(newCircuitBreakerOpenError(cb.RemainingDelay()), codes.Unavailable)
+		cbOpenErr := middleware.DoNotLogError{Err: newCircuitBreakerOpenError(cb.RemainingDelay())}
+		return newErrorWithStatus(cbOpenErr, codes.Unavailable)
 	}
 	return cb.processError(ctx, err)
 }
@@ -162,7 +164,8 @@ func (cb *circuitBreaker) get(ctx context.Context, f func() (any, error)) (any, 
 	res, err := cb.executor.Get(f)
 	if err != nil && errors.Is(err, circuitbreaker.ErrOpen) {
 		cb.metrics().circuitBreakerResults.WithLabelValues(cb.ingesterID(), resultOpen).Inc()
-		return res, newErrorWithStatus(newCircuitBreakerOpenError(cb.RemainingDelay()), codes.Unavailable)
+		cbOpenErr := middleware.DoNotLogError{Err: newCircuitBreakerOpenError(cb.RemainingDelay())}
+		return res, newErrorWithStatus(cbOpenErr, codes.Unavailable)
 	}
 	return res, cb.processError(ctx, err)
 }
@@ -205,7 +208,10 @@ func (cb *circuitBreaker) StartPushRequest(ctx context.Context, reqSize int64) (
 		callbackCtx, _, callbackErr := cb.ingester.startPushRequest(ctx, reqSize)
 		return callbackCtx, callbackErr
 	})
-	return callbackCtx.(context.Context), callbackErr
+	if callbackErr == nil {
+		return callbackCtx.(context.Context), nil
+	}
+	return nil, callbackErr
 }
 
 func (cb *circuitBreaker) Push(parent context.Context, req *mimirpb.WriteRequest) (*mimirpb.WriteResponse, error) {

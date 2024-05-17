@@ -600,6 +600,9 @@ func mapReadErrorToErrorWithStatus(err error) error {
 			errCode = codes.Unavailable
 		case mimirpb.METHOD_NOT_ALLOWED:
 			return newErrorWithStatus(err, codes.Unimplemented)
+		case mimirpb.CIRCUIT_BREAKER_OPEN:
+			// this is already an ErrorWithStatus
+			return err
 		}
 	}
 	return newErrorWithStatus(err, errCode)
